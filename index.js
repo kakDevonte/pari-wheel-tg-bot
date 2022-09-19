@@ -1,6 +1,8 @@
 import { config } from "dotenv";
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import axios from "axios";
+import { referralAPI } from "./api.js";
 
 config();
 
@@ -65,7 +67,7 @@ const noSubscribeSecond = {
     inline_keyboard: [
       [
         { text: "Канал PARI", url: "https://t.me/test_pari_chanel" },
-        { text: "Я подписался", callback_data: "02" },
+        { text: "Я подписался", callback_data: "01" },
       ],
     ],
   }),
@@ -89,10 +91,24 @@ bot.onText(/\/start/, async (msg, match) => {
 
   const isSubscribe = await isSubscribedToTheChannel(msg.from.id);
   if (referrer && isSubscribe) {
+    const response = await referralAPI.getReferrals(referrer);
+    let isActive = false;
+    for (const ref of response.data.referrals) {
+      if (ref.referral_id === msg.chat.id) isActive = true;
+    }
     sendStartMessage(chatId);
+
+    if (isActive) return;
+
     const resp =
-      "Кто-то из друзей воспользовался твоей ссылкой! Уже начислили тебе\n попытки. Пойдем играть!";
+      "Кто-то из друзей воспользовался твоей ссылкой! Уже начислили тебе попытки. Пойдем играть!";
     bot.sendMessage(referrer, resp, game);
+
+    await referralAPI.addReferral({
+      referrer_id: referrer,
+      referral_id: userId,
+      is_active: 1,
+    });
   } else if (isSubscribe) {
     sendStartMessage(chatId);
   } else {
@@ -105,16 +121,42 @@ bot.onText(/\/start/, async (msg, match) => {
       resp + "[канал PARI](https://t.me/test_pari_chanel)",
       noSubscribe
     );
+    await referralAPI.addReferral({
+      referrer_id: referrer,
+      referral_id: userId,
+      is_active: 0,
+    });
   }
 });
 
 bot.on("callback_query", async (msg) => {
   const isSubscribe = await isSubscribedToTheChannel(msg.from.id);
-  if (msg.data == "01") {
-    if (referrer) {
-      console.log("ты подписан и поэтому получаешь 5 баллов УУУУ");
+
+  const response = await referralAPI.getReferrals(referrer);
+  let isActive = false;
+  let currReferral = null;
+
+  if (response.data)
+    for (const ref of response.data.referrals) {
+      if (ref.referral_id === msg.chat.id && ref.is_active === 0) {
+        isActive = true;
+        currReferral = ref;
+      }
     }
+
+  if (msg.data == "01") {
     if (isSubscribe) {
+      if (isActive) {
+        await referralAPI.updateReferral({
+          referrer_id: currReferral.referrer_id,
+          referral_id: msg.from.id,
+          is_active: 1,
+        });
+
+        const resp =
+          "Кто-то из друзей воспользовался твоей ссылкой! Уже начислили тебе попытки. Пойдем играть!";
+        bot.sendMessage(referrer, resp, game);
+      }
       const resp =
         "Привет! \n" +
         "PARI хочет кое-что тебе подарить. Заинтересован? \n" +
