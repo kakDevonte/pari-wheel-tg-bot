@@ -11,7 +11,6 @@ const bot = new TelegramBot(token, { polling: true });
 const app = express();
 let referrer = null;
 let userId = null;
-//const TELEGRAM_URI = `https://api.telegram.org/bot${process.env.TELEGRAM_API_TOKEN}/sendMessage`;
 
 app.use(express.json());
 app.use(
@@ -51,7 +50,6 @@ const game = {
     ],
   }),
 };
-
 const noSubscribe = {
   parse_mode: "markdown",
   disable_web_page_preview: false,
@@ -59,7 +57,6 @@ const noSubscribe = {
     inline_keyboard: [[{ text: "Я подписался", callback_data: "01" }]],
   }),
 };
-
 const noSubscribeSecond = {
   parse_mode: "markdown",
   disable_web_page_preview: false,
@@ -76,11 +73,24 @@ const noSubscribeSecond = {
 const isSubscribedToTheChannel = async (userId) => {
   try {
     let response = await bot.getChatMember(-1001780461970, userId);
-    console.log(response);
     if (response.status === "left") return false;
     else return true;
   } catch (err) {
     return false;
+  }
+};
+
+const updateUser = async (userId) => {
+  try {
+    const { data } = await referralAPI.getUser(userId);
+    await referralAPI.updateUser({
+      telegram_id: data.telegram_id,
+      telegram_username: data.telegram_username,
+      points: data.points,
+      tryCount: data.tryCount + 5,
+    });
+  } catch (e) {
+    console.log(e);
   }
 };
 
@@ -89,13 +99,30 @@ bot.onText(/\/start/, async (msg, match) => {
   userId = msg.chat.id;
   referrer = msg.text.split(" ")[1];
 
+  console.log(referrer);
+
   const isSubscribe = await isSubscribedToTheChannel(msg.from.id);
+
+  if (chatId == referrer) return;
+
   if (referrer && isSubscribe) {
-    const response = await referralAPI.getReferrals(referrer);
     let isActive = false;
-    for (const ref of response.data.referrals) {
-      if (ref.referral_id === msg.chat.id) isActive = true;
+    try {
+      const response = await referralAPI.getReferrals();
+
+      if (response.data.length)
+        for (const ref of response.data) {
+          if (
+            ref.referral_id === msg.chat.id &&
+            ref.is_active === 1 &&
+            ref.referrer_id == referrer
+          )
+            isActive = true;
+        }
+    } catch (e) {
+      console.log(e);
     }
+
     sendStartMessage(chatId);
 
     if (isActive) return;
@@ -109,53 +136,62 @@ bot.onText(/\/start/, async (msg, match) => {
       referral_id: userId,
       is_active: 1,
     });
+    await updateUser(referrer);
   } else if (isSubscribe) {
     sendStartMessage(chatId);
   } else {
     const resp =
-      "Кажется, ты ещё не подписан на наш канал!\n" +
+      "Кажется, ты ещё не подписан на наш канал!" +
       "Чтобы играть и участвовать в розыгрыше призов, нужно подписаться на ";
+
+    console.log(referrer);
+    if (referrer)
+      await referralAPI.addReferral({
+        referrer_id: referrer,
+        referral_id: userId,
+        is_active: 0,
+      });
 
     bot.sendMessage(
       chatId,
       resp + "[канал PARI](https://t.me/test_pari_chanel)",
       noSubscribe
     );
-    await referralAPI.addReferral({
-      referrer_id: referrer,
-      referral_id: userId,
-      is_active: 0,
-    });
   }
 });
 
 bot.on("callback_query", async (msg) => {
   const isSubscribe = await isSubscribedToTheChannel(msg.from.id);
-
-  const response = await referralAPI.getReferrals(referrer);
   let isActive = false;
   let currReferral = null;
 
-  if (response.data)
-    for (const ref of response.data.referrals) {
-      if (ref.referral_id === msg.chat.id && ref.is_active === 0) {
-        isActive = true;
-        currReferral = ref;
-      }
+  const response = await referralAPI.getReferrals();
+  for (const ref of response.data) {
+    if (ref.referral_id == msg.from.id && ref.is_active == 0) {
+      isActive = true;
+      currReferral = ref;
     }
+  }
 
   if (msg.data == "01") {
     if (isSubscribe) {
       if (isActive) {
-        await referralAPI.updateReferral({
-          referrer_id: currReferral.referrer_id,
-          referral_id: msg.from.id,
-          is_active: 1,
-        });
+        try {
+          const result = await referralAPI.updateReferral({
+            id: currReferral.id,
+            referrer_id: currReferral.referrer_id,
+            referral_id: msg.from.id,
+            is_active: 1,
+          });
+        } catch (e) {
+          console.log(e);
+        }
 
         const resp =
           "Кто-то из друзей воспользовался твоей ссылкой! Уже начислили тебе попытки. Пойдем играть!";
-        bot.sendMessage(referrer, resp, game);
+        bot.sendMessage(currReferral.referrer_id, resp, game);
+
+        await updateUser(currReferral.referrer_id);
       }
       const resp =
         "Привет! \n" +
@@ -198,10 +234,28 @@ bot.on("callback_query", async (msg) => {
   }
 });
 
-bot.on("message", (msg) => {
-  if (msg.text !== "/start") {
-    console.log(msg);
-    const chatId = msg.chat.id;
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  referrer = msg.text.split(" ")[1];
+
+  if (msg.text == "/start") {
+    return;
+  } else if (msg.text == "/start" + " " + referrer) {
+    return;
+  }
+
+  const isSubscribe = await isSubscribedToTheChannel(msg.from.id);
+  if (!isSubscribe) {
+    const resp =
+      "Кажется, ты ещё не подписан на наш канал! " +
+      "Чтобы играть и участвовать в розыгрыше призов, нужно подписаться на ";
+
+    bot.sendMessage(
+      chatId,
+      resp + "[канал PARI](https://t.me/test_pari_chanel)",
+      noSubscribe
+    );
+  } else {
     const resp = "Пожалуйста, пользуйся кнопками.";
     bot.sendMessage(chatId, resp, game);
   }
